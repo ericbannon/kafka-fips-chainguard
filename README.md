@@ -1,5 +1,16 @@
 # kafka-fips-chainguard
 
+Requirements Satsified with this Architecture: 
+
+* Cilium IPsec enabled
+* AES-GCM (rfc4106(gcm(aes))) in use
+* Default-deny CiliumNetworkPolicies
+* mTLS on Kafka proxy
+* FIPS-Validated Chainguard images (Cilium and Kafka-Proxy)
+* EKS (which uses FIPS-capable kernel crypto modules)
+
+Additional Reccomendation:
+* OS in FIPS mode (proc/sys/crypto/fips_enabled = 1)
 
 ## Create cluster UID
 
@@ -8,8 +19,7 @@ docker run --rm cgr.dev/chainguard-private/kafka:latest \
   kafka-storage.sh random-uuid
 ```
 
-## Geberate local TLS certs and create a secret
-
+## Geberate local TLS certs and create a secret (Skip to generating secret if you already have keys)
 
 ```
 openssl genrsa -out ca.key 4096
@@ -103,7 +113,17 @@ kubectl -n kafka exec -it deploy/broker-0 -- \
 
 # Cilium FIPS
 
-## Initial Installation 
+## Configure CIPHER Suite Secret for Encryption
+
+```
+kubectl -n kube-system create secret generic cilium-ipsec-keys \
+  --from-literal=keys="1 rfc4106(gcm(aes)) $(openssl rand -hex 20) 128" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Note: the algorithm used and enforced is reccomended for encryption in this use case
+
+## Installation 
 
 ```
 helm repo add cilium https://helm.cilium.io/
@@ -117,4 +137,48 @@ helm upgrade --install cilium cilium/cilium \
   -f values.yaml
 ```
 
-##
+## Apply FIPS restrictive network policies for Cilium
+
+```
+kubectl apply -f fips-network-policies/kafka-cilium-netpol.yaml
+```
+
+**Verify Encryption** 
+
+```
+kubectl -n kube-system exec ds/cilium -- cilium status | grep Encryption
+
+kubectl -n kube-system exec ds/cilium -- ip -s xfrm state
+
+kubectl -n kube-system exec ds/cilium -- cilium encrypt status
+
+kubectl -n kube-system exec ds/cilium -- sh -lc "ip -s xfrm state | egrep -n 'aead|auth|enc|rfc4106|gcm|cbc|sha' | head -n 50"
+```
+
+**Confirm Network Policy Enforcement:**
+
+```
+kubectl -n kafka get ciliumnetworkpolicies
+
+kubectl -n kube-system exec ds/cilium -- cilium status | grep Policy
+
+kubectl create ns test-ns
+
+kubectl -n test-ns run testpod \
+  --image=curlimages/curl \
+  --restart=Never \
+  -- sleep 3600
+
+kubectl -n test-ns exec testpod -- \
+  nc -zv <broker-pod-ip> 9092
+```
+
+...this last command should time out 
+
+
+# Test FIPS Configurations
+
+## FIPS Ciphers using OpenSSL (local port-forward)
+
+```
+kubectl -n kafka port-forward svc/kafka-proxy-0 9094:9094

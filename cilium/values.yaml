@@ -27,6 +27,10 @@ operator:
     restart: false
     intervalSeconds: 15
 
+encryption:
+  enabled: true
+  type: ipsec
+
 # For EKS: keep automount enabled
 bpf:
   autoMount:

@@ -1,0 +1,199 @@
+# 1) DNS egress for ALL pods in kafka namespace
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-dns-egress
+  namespace: kafka
+spec:
+  endpointSelector: {}
+  egress:
+    # CoreDNS (common on EKS)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: coredns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # kube-dns (common elsewhere)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# 2) KRaft controller quorum: controller <-> controller on 9093
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-controller-quorum
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka
+      role: controller
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: controller
+      toPorts:
+        - ports:
+            - port: "9093"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: controller
+      toPorts:
+        - ports:
+            - port: "9093"
+              protocol: TCP
+---
+# 3) Brokers <-> controllers on 9093 (KRaft)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-broker-to-controller
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka
+      role: broker
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: controller
+      toPorts:
+        - ports:
+            - port: "9093"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-controller-from-broker
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka
+      role: controller
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: broker
+      toPorts:
+        - ports:
+            - port: "9093"
+              protocol: TCP
+---
+# 4) Broker <-> broker on 9092 (inter-broker replication, etc.)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-broker-interbroker
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka
+      role: broker
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: broker
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: broker
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+---
+# 5) Proxy -> brokers on 9092
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-proxy-to-brokers
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka-proxy
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka
+            k8s:role: broker
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-broker-from-proxy
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka
+      role: broker
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app: kafka-proxy
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+---
+# 6) OPTIONAL: allow clients anywhere in the cluster to hit proxies on 9094
+# If you want "all namespaces", this is the clean Cilium way:
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-ingress-to-proxy-9094
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kafka-proxy
+  ingress:
+    - fromEntities:
+        - cluster
+      toPorts:
+        - ports:
+            - port: "9094"
+              protocol: TCP
