@@ -9,6 +9,12 @@ Requirements Satsified with this Architecture:
 * Default-deny CiliumNetworkPolicies
 * EKS (which uses FIPS-capable kernel crypto modules)
 
+**DOCUMENTATION AREAS:**
+
+Client → mTLS (FIPS TLS1.3) → Proxy
+Proxy → Cilium IPsec (AES-GCM) → Broker
+Node-to-node → IPsec ESP
+
 Additional Reccomendation:
 * OS in FIPS mode (proc/sys/crypto/fips_enabled = 1)
 
@@ -189,3 +195,15 @@ kubectl -n test-ns exec testpod -- \
 
 ```
 kubectl -n kafka port-forward svc/kafka-proxy-0 9094:9094
+
+openssl s_client -connect localhost:9094 -tls1
+
+openssl s_client -connect localhost:9094
+
+openssl s_client \
+  -connect localhost:9094 \
+  -CAfile ca.crt \
+  -cert client.crt \
+  -key client.key \
+  -tls1_3 </dev/null 2>/dev/null | egrep 'Protocol|Cipher|Verify return code'
+```
