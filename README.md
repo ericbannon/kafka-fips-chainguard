@@ -2,11 +2,11 @@
 
 Requirements Satsified with this Architecture: 
 
+* FIPS-Validated Chainguard images (Cilium and Kafka-Proxy)
+* mTLS on Kafka proxy
 * Cilium IPsec enabled
 * AES-GCM (rfc4106(gcm(aes))) in use
 * Default-deny CiliumNetworkPolicies
-* mTLS on Kafka proxy
-* FIPS-Validated Chainguard images (Cilium and Kafka-Proxy)
 * EKS (which uses FIPS-capable kernel crypto modules)
 
 Additional Reccomendation:
@@ -72,6 +72,13 @@ kubectl -n kafka create secret generic kafka-client-mtls \
   --from-file=client.crt=client.crt \
   --from-file=client.key=client.key \
   --dry-run=client -o yaml | kubectl apply -f -
+```
+
+## Deploy brokers and proxies
+
+```
+kubectl apply -f brokers.yaml
+kubectl apply -f proxies.yaml 
 ```
 
 ## kcat mTLS test
