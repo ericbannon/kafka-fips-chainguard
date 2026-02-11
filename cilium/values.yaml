@@ -1,0 +1,44 @@
+kubeProxyReplacement: false
+
+# Agent image
+image:
+  repository: 452336408843.dkr.ecr.us-west-2.amazonaws.com/cilium-agent-fips
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Prevent any "@<digest>" being added (belt+suspenders across chart versions)
+useDigest: false
+imageDigest: ""
+imageDigestFile: ""
+image:
+  digest: ""
+  useDigest: false
+
+operator:
+  image:
+    repository: 452336408843.dkr.ecr.us-west-2.amazonaws.com/cilium-operator-fips
+    tag: latest
+    pullPolicy: Always
+    suffix: ""          # critical: prevents "-generic" suffix being appended
+    useDigest: false
+    digest: ""
+    genericDigest: ""
+  unmanagedPodWatcher:
+    restart: false
+    intervalSeconds: 15
+
+# For EKS: keep automount enabled
+bpf:
+  autoMount:
+    enabled: true
+cgroup:
+  autoMount:
+    enabled: true
+
+ipam:
+  mode: cluster-pool
+
+clusterPoolIPv4PodCIDRList:
+  - "10.244.0.0/16"
+
+clusterPoolIPv4MaskSize: 24
