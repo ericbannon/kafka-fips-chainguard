@@ -1,0 +1,96 @@
+{{- range $i, $e := until (.Values.proxy.replicaCount | int) }}
+{{- $broker := index $.Values.proxy.brokers $i }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-proxy-{{ $i }}
+  labels:
+    app.kubernetes.io/name: kafka-proxy
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/component: proxy
+    kafka-proxy/ordinal: "{{ $i }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka-proxy
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+      app.kubernetes.io/component: proxy
+      kafka-proxy/ordinal: "{{ $i }}"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-proxy
+        app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+        app.kubernetes.io/component: proxy
+        kafka-proxy/ordinal: "{{ $i }}"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: kafka-proxy
+          image: "{{ $.Values.proxy.image.registry }}/{{ $.Values.proxy.image.repository }}:{{ $.Values.proxy.image.tag }}"
+          imagePullPolicy: {{ $.Values.proxy.image.pullPolicy }}
+          args:
+            - server
+            - --dynamic-listeners-disable
+
+            # Proxy listens on 0.0.0.0:<kafkaPort> and advertises kafka-proxy-<i>.<ns>.svc.<clusterDomain>:<kafkaPort>
+            - --bootstrap-server-mapping
+            - {{ $broker.host }}:{{ $broker.port }},0.0.0.0:{{ $.Values.proxy.service.kafkaPort }},kafka-proxy-{{ $i }}.{{ $.Release.Namespace }}.svc.{{ $.Values.clusterDomain }}:{{ $.Values.proxy.service.kafkaPort }}
+
+            # Dial mapping: where the proxy actually connects upstream
+            - --dial-address-mapping
+            - {{ $broker.host }}:{{ $broker.port }},{{ $broker.host }}:{{ $broker.port }}
+
+            # External mapping: what clients should see in metadata (map broker address -> proxy address)
+            {{- range $j, $b := $.Values.proxy.brokers }}
+            - --external-server-mapping
+            - {{ $b.host }}:{{ $b.port }},kafka-proxy-{{ $j }}.{{ $.Release.Namespace }}.svc.{{ $.Values.clusterDomain }}:{{ $.Values.proxy.service.kafkaPort }}
+            {{- end }}
+
+            - --http-listen-address
+            - 0.0.0.0:{{ $.Values.proxy.service.httpPort }}
+
+            # TLS on the proxy listener (mTLS)
+            - --proxy-listener-tls-enable
+            - --proxy-listener-cert-file
+            - /tls/tls.crt
+            - --proxy-listener-key-file
+            - /tls/tls.key
+            - --proxy-listener-ca-chain-cert-file
+            - /tls/ca.crt
+
+            - --log-level
+            - {{ $.Values.proxy.logLevel | default "info" }}
+          ports:
+            - name: kafka-mtls
+              containerPort: {{ $.Values.proxy.service.kafkaPort }}
+            - name: http
+              containerPort: {{ $.Values.proxy.service.httpPort }}
+          resources:
+            {{- toYaml $.Values.proxy.resources | nindent 12 }}
+          volumeMounts:
+            - name: mtls
+              mountPath: /tls
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: kafka-mtls
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: kafka-mtls
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: mtls
+          secret:
+            secretName: {{ $.Values.proxy.tlsSecretName }}
+{{- end }}

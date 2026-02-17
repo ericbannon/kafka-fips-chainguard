@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kafka-proxy
+description: Kafka TLS/mTLS proxy side deployment (one per broker)
+type: application
+version: 0.1.0
+appVersion: "0.4.3"

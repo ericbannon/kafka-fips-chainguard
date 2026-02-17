@@ -1,0 +1,27 @@
+{{- range $i, $e := until (.Values.proxy.replicaCount | int) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-proxy-{{ $i }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kafka-proxy
+    app.kubernetes.io/component: proxy
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kafka-proxy
+    app.kubernetes.io/component: proxy
+    kafka-proxy/ordinal: "{{ $i }}"
+  ports:
+    - name: kafka-mtls
+      protocol: TCP
+      port: {{ $.Values.proxy.service.kafkaPort }}
+      targetPort: {{ $.Values.proxy.service.kafkaPort }}
+    - name: http
+      protocol: TCP
+      port: {{ $.Values.proxy.service.httpPort }}
+      targetPort: {{ $.Values.proxy.service.httpPort }}
+{{- end }}

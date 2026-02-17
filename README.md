@@ -212,6 +212,33 @@ echo "consumer-exit-code=$?"
 '
 
 ```
+# Deploy proxy-fips
+
+```
+helm upgrade --install kafka-proxy ./charts/kafka-proxy-fips \
+  -n kafka
+```
+
+#### Smoke Test
+
+**create test pod**:
+```
+
+```
+
+**connectivity test**
+```
+kubectl -n kafka exec kafka-client-test -- sh -lc '
+openssl s_client \
+  -connect kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  -servername kafka-proxy-0.kafka.svc.cluster.local \
+  -CAfile /tls/ca.crt \
+  -cert /tls/client.crt \
+  -key /tls/client.key \
+  -verify_return_error \
+  -brief < /dev/null
+'
+```
 
 # Cilium FIPS
 

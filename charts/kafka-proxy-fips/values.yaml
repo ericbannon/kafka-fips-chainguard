@@ -1,0 +1,40 @@
+clusterDomain: cluster.local
+
+proxy:
+  replicaCount: 3
+
+  image:
+    registry: 452336408843.dkr.ecr.us-west-2.amazonaws.com
+    repository: kafka-proxy-fips
+    tag: "0.4.3"
+    pullPolicy: IfNotPresent
+
+  service:
+    kafkaPort: 9094
+    httpPort: 9080
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Secret mounted at /tls containing:
+  # - ca.crt
+  # - tls.crt
+  # - tls.key
+  tlsSecretName: kafka-proxy-mtls
+
+  logLevel: info
+
+  # Kafka brokers the proxy dials (TLS)
+  # IMPORTANT: these should be resolvable Services (one per broker) + TLS port
+  brokers:
+    - host: kafka-broker-0.kafka-broker-headless.kafka.svc.cluster.local
+      port: 9094
+    - host: kafka-broker-1.kafka-broker-headless.kafka.svc.cluster.local
+      port: 9094
+    - host: kafka-broker-2.kafka-broker-headless.kafka.svc.cluster.local
+      port: 9094
