@@ -18,6 +18,8 @@ Node-to-node → IPsec ESP
 Additional Reccomendation:
 * OS in FIPS mode (proc/sys/crypto/fips_enabled = 1)
 
+# IAMGUARDED Kafka Deployment Setup
+
 ## Create cluster UID
 
 ```
@@ -37,13 +39,26 @@ openssl req -x509 -new -nodes \
   -out ca.crt \
   -subj "/CN=kafka-mtls-ca"
 
+# PROXY leaf (uses SANs+EKUs from kafka-openssl.cnf)
 openssl genrsa -out proxy.key 4096
 
 openssl req -new \
   -key proxy.key \
   -out proxy.csr \
-  -config proxy-openssl.cnf
+  -config kafka-openssl.cnf
 
+openssl x509 -req \
+  -in proxy.csr \
+  -CA ca.crt \
+  -CAkey ca.key \
+  -CAcreateserial \
+  -out proxy.crt \
+  -days 365 \
+  -sha256 \
+  -extfile kafka-openssl.cnf \
+  -extensions v3_req
+
+# CLIENT leaf (simple client cert; optional to also give SANs/EKU via cnf)
 openssl genrsa -out client.key 4096
 
 openssl req -new \
@@ -61,68 +76,142 @@ openssl x509 -req \
   -sha256
 ```
 
-### Generate Proxy Secret
+### Generate TLS Secret
 ```
-kubectl -n kafka create secret generic kafka-proxy-mtls \
+kubectl -n kafka create secret generic kafka-tls \
   --from-file=tls.crt=proxy.crt \
   --from-file=tls.key=proxy.key \
   --from-file=ca.crt=ca.crt \
   --dry-run=client -o yaml | kubectl apply -f -
-```
 
-## Generate Client Secret
-
-```
 kubectl -n kafka create secret generic kafka-client-mtls \
   --from-file=ca.crt=ca.crt \
   --from-file=client.crt=client.crt \
   --from-file=client.key=client.key \
   --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n kafka create secret generic kafka-proxy-mtls \
+  --from-file=ca.crt=ca.crt \
+  --from-file=tls.crt=proxy.crt \
+  --from-file=tls.key=proxy.key \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-## Deploy brokers and proxies
+### Generate keystores and Truststores for JKS
 
 ```
-kubectl apply -f brokers.yaml
-kubectl apply -f proxies.yaml 
-```
+KEYPASS="$(openssl rand -hex 24)"
+TRUSTPASS="$(openssl rand -hex 24)"
 
-## kcat mTLS test
+echo "KEYPASS=$KEYPASS"
+echo "TRUSTPASS=$TRUSTPASS"
 
-```
-kubectl -n kafka run kcat --rm -i --restart=Never \
-  --image=edenhill/kcat:1.7.1 \
-  --overrides='
-{
-  "spec": {
-    "containers": [{
-      "name": "kcat",
-      "image": "edenhill/kcat:1.7.1",
-      "command": ["sh","-lc"],
-      "args": ["kcat -b kafka-proxy-0.kafka.svc:9094 -X security.protocol=SSL -X ssl.ca.location=/certs/ca.crt -X ssl.certificate.location=/certs/client.crt -X ssl.key.location=/certs/client.key -L"],
-      "volumeMounts": [{"name":"certs","mountPath":"/certs","readOnly":true}]
-    }],
-    "volumes": [{"name":"certs","secret":{"secretName":"kafka-client-mtls"}}]
-  }
-}'
-```
+kubectl -n kafka create secret generic kafka-tls-passwords \
+  --from-literal=keystore-password="$KEYPASS" \
+  --from-literal=truststore-password="$TRUSTPASS" \
+  --dry-run=client -o yaml | kubectl apply -f -
+  ```
 
-## Test create a topic
+### Generate JKS Secrets for Iamguarded Chainguard Configuration
 
 ```
-kubectl -n kafka exec -it deploy/broker-0 -- \
-  kafka-topics.sh --bootstrap-server broker-0.kafka.svc:9092 \
-  --create --topic test --partitions 3 --replication-factor 3
+openssl pkcs8 -topk8 -nocrypt -in proxy.key -out proxy.pkcs8.key
+
+openssl pkcs12 -export \
+  -in proxy.crt \
+  -inkey proxy.pkcs8.key \
+  -certfile ca.crt \
+  -name kafka \
+  -passout pass:"$KEYPASS" \
+  -out kafka.keystore.p12
+
+keytool -importkeystore \
+  -srckeystore kafka.keystore.p12 \
+  -srcstoretype PKCS12 \
+  -srcstorepass "$KEYPASS" \
+  -destkeystore kafka.keystore.jks \
+  -deststoretype JKS \
+  -deststorepass "$KEYPASS" \
+  -noprompt
+
+keytool -importcert \
+  -alias CARoot \
+  -file ca.crt \
+  -keystore kafka.truststore.jks \
+  -storepass "$TRUSTPASS" \
+  -noprompt
+
+kubectl -n kafka create secret generic kafka-jks \
+  --from-file=kafka.keystore.jks=./kafka.keystore.jks \
+  --from-file=kafka.truststore.jks=./kafka.truststore.jks \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-## mTLS FIPS Compliance tests should return the following:
 
-* TLS 1.2 negotiated
-* TLS 1.1 rejected
-* Cipher ECDHE-RSA-AES128-GCM-SHA256 (FIPS)
-* Hash SHA-256 
-* Key exchange P-256 
-* Mutual auth happened (server requested client cert, client sent it) 
+## Deploy Kafka Brokers (Chainguard Iamguarded Chart)
+
+```
+helm upgrade --install kafka oci://cgr.dev/chainguard-private/iamguarded-charts/kafka \
+  -n kafka --create-namespace \
+  -f kafka-helm/values.yaml
+```
+
+## Tests & Confirmation
+
+```
+kubectl -n kafka exec kafka-broker-0 -c kafka -- sh -lc '
+cat >/tmp/client-ssl.properties <<EOF
+security.protocol=SSL
+ssl.endpoint.identification.algorithm=https
+
+ssl.truststore.location=/opt/iamguarded/kafka/config/certs/kafka.truststore.jks
+ssl.truststore.password=$(grep -m1 "^ssl.truststore.password=" /opt/iamguarded/kafka/config/server.properties | cut -d= -f2)
+
+ssl.keystore.location=/opt/iamguarded/kafka/config/certs/kafka.keystore.jks
+ssl.keystore.password=$(grep -m1 "^ssl.keystore.password=" /opt/iamguarded/kafka/config/server.properties | cut -d= -f2)
+ssl.key.password=$(grep -m1 "^ssl.keystore.password=" /opt/iamguarded/kafka/config/server.properties | cut -d= -f2)
+EOF
+
+echo "Wrote /tmp/client-ssl.properties"
+ls -l /tmp/client-ssl.properties
+'
+```
+#### Smoke Test
+
+```
+kubectl -n kafka exec kafka-broker-0 -c kafka -- sh -lc '
+/opt/iamguarded/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-broker-headless.kafka.svc:9094 \
+  --command-config /tmp/client-ssl.properties \
+  --create --if-not-exists \
+  --topic smoke-test --partitions 3 --replication-factor 3
+'
+
+kubectl -n kafka exec -i kafka-broker-0 -c kafka -- sh -lc '
+echo "hello-$(date +%s)" | /opt/iamguarded/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka-broker-headless.kafka.svc:9094 \
+  --producer.config /tmp/client-ssl.properties \
+  --topic smoke-test \
+  --request-required-acks all \
+  --producer-property linger.ms=0 \
+  --producer-property retries=3 \
+  --producer-property delivery.timeout.ms=15000
+echo "producer-exit-code=$?"
+'
+
+kubectl -n kafka exec kafka-broker-0 -c kafka -- sh -lc '
+/opt/iamguarded/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka-broker-headless.kafka.svc:9094 \
+  --consumer.config /tmp/client-ssl.properties \
+  --topic smoke-test \
+  --group smoke-test-g1 \
+  --from-beginning \
+  --timeout-ms 20000 \
+  --max-messages 5
+echo "consumer-exit-code=$?"
+'
+
+```
 
 # Cilium FIPS
 

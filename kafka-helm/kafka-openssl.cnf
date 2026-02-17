@@ -1,0 +1,51 @@
+[ req ]
+default_bits       = 4096
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = v3_req
+
+[ dn ]
+# CN isn't used for hostname validation in modern TLS; SAN is.
+CN = kafka
+
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName = @alt_names
+
+[ alt_names ]
+# --- Kafka (internal) ---
+DNS.1  = kafka.kafka.svc
+DNS.2  = kafka.kafka.svc.cluster.local
+DNS.3  = kafka-broker-headless.kafka.svc
+DNS.4  = kafka-broker-headless.kafka.svc.cluster.local
+DNS.5  = kafka-controller-headless.kafka.svc
+DNS.6  = kafka-controller-headless.kafka.svc.cluster.local
+
+# If you run per-pod/controller hostnames (common with StatefulSets)
+DNS.7  = kafka-controller-0.kafka-controller-headless.kafka.svc
+DNS.8  = kafka-controller-0.kafka-controller-headless.kafka.svc.cluster.local
+DNS.9  = kafka-controller-1.kafka-controller-headless.kafka.svc
+DNS.10 = kafka-controller-1.kafka-controller-headless.kafka.svc.cluster.local
+DNS.11 = kafka-controller-2.kafka-controller-headless.kafka.svc
+DNS.12 = kafka-controller-2.kafka-controller-headless.kafka.svc.cluster.local
+
+# Optional: if you have per-broker pod DNS names (StatefulSet)
+DNS.13 = kafka-broker-0.kafka-broker-headless.kafka.svc
+DNS.14 = kafka-broker-0.kafka-broker-headless.kafka.svc.cluster.local
+DNS.15 = kafka-broker-1.kafka-broker-headless.kafka.svc
+DNS.16 = kafka-broker-1.kafka-broker-headless.kafka.svc.cluster.local
+DNS.17 = kafka-broker-2.kafka-broker-headless.kafka.svc
+DNS.18 = kafka-broker-2.kafka-broker-headless.kafka.svc.cluster.local
+
+# --- Proxy (mTLS listener names clients hit) ---
+DNS.19 = kafka-proxy.kafka.svc
+DNS.20 = kafka-proxy.kafka.svc.cluster.local
+DNS.21 = kafka-proxy-0.kafka.svc
+DNS.22 = kafka-proxy-0.kafka.svc.cluster.local
+DNS.23 = kafka-proxy-1.kafka.svc
+DNS.24 = kafka-proxy-1.kafka.svc.cluster.local
+DNS.25 = kafka-proxy-2.kafka.svc
+DNS.26 = kafka-proxy-2.kafka.svc.cluster.local
