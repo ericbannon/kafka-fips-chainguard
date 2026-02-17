@@ -221,23 +221,69 @@ helm upgrade --install kafka-proxy ./charts/kafka-proxy-fips \
 
 #### Smoke Test
 
-**create test pod**:
-```
+**Create client test pod"** 
 
 ```
+kubectl -n kafka apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kafka-client-test
+  namespace: kafka
+  labels:
+    app: kafka-client-test
+spec:
+  restartPolicy: Never
+  containers:
+  - name: client
+    image: 452336408843.dkr.ecr.us-west-2.amazonaws.com/kafka:iamguarded-cg
+    command: ["sh","-lc","sleep 365000"]
+    volumeMounts:
+    - name: mtls
+      mountPath: /tls
+      readOnly: true
+  volumes:
+  - name: mtls
+    secret:
+      secretName: kafka-client-mtls
+YAML
+```
 
-**connectivity test**
+**Test the api from the proxy:** 
+```
+kubectl -n kafka exec kafka-client-test -- \
+  /opt/iamguarded/kafka/bin/kafka-broker-api-versions.sh \
+  --bootstrap-server kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  --command-config /tmp/client.properties | head -n 60
+
+kubectl -n kafka exec -i kafka-client-test -- sh -lc '
+echo "hello-$(date +%s)" | /opt/iamguarded/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  --producer.config /tmp/client.properties \
+  --topic smoke-test
+'
+
+kubectl -n kafka exec kafka-client-test -- sh -lc '
+/opt/iamguarded/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  --consumer.config /tmp/client.properties \
+  --topic smoke-test --from-beginning \
+  --max-messages 5 --timeout-ms 15000
+'
+```
+
+**End-to-end mTLS test:**
+
 ```
 kubectl -n kafka exec kafka-client-test -- sh -lc '
-openssl s_client \
-  -connect kafka-proxy-0.kafka.svc.cluster.local:9094 \
-  -servername kafka-proxy-0.kafka.svc.cluster.local \
-  -CAfile /tls/ca.crt \
-  -cert /tls/client.crt \
-  -key /tls/client.key \
-  -verify_return_error \
-  -brief < /dev/null
+/opt/iamguarded/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  --command-config /tmp/client.properties \
+  --create --if-not-exists \
+  --topic smoke-test --partitions 3 --replication-factor 3
 '
+
+
 ```
 
 # Cilium FIPS
@@ -263,13 +309,13 @@ helm repo update
 helm upgrade --install cilium cilium/cilium \
   -n kube-system --create-namespace \
   --version 1.16.6 \
-  -f values.yaml
+  -f cilium/values.yaml
 ```
 
 ## Apply FIPS restrictive network policies for Cilium
 
 ```
-kubectl apply -f fips-network-policies/kafka-cilium-netpol.yaml
+kubectl apply -f cilium/fips-network-policies/kafka-cilium-netpol.yaml
 ```
 
 **Verify Encryption** 
@@ -290,20 +336,7 @@ kubectl -n kube-system exec ds/cilium -- sh -lc "ip -s xfrm state | egrep -n 'ae
 kubectl -n kafka get ciliumnetworkpolicies
 
 kubectl -n kube-system exec ds/cilium -- cilium status | grep Policy
-
-kubectl create ns test-ns
-
-kubectl -n test-ns run testpod \
-  --image=curlimages/curl \
-  --restart=Never \
-  -- sleep 3600
-
-kubectl -n test-ns exec testpod -- \
-  nc -zv <broker-pod-ip> 9092
-```
-
-...this last command should time out 
-
+``` 
 
 # Test FIPS Configurations
 

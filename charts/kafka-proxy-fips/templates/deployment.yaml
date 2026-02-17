@@ -5,11 +5,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kafka-proxy-{{ $i }}
+  namespace: {{ $.Release.Namespace }}
   labels:
     app.kubernetes.io/name: kafka-proxy
     app.kubernetes.io/instance: {{ $.Release.Name | quote }}
     app.kubernetes.io/component: proxy
-    kafka-proxy/ordinal: "{{ $i }}"
+    kafka-proxy/ordinal: {{ $i | quote }}
 spec:
   replicas: 1
   selector:
@@ -17,14 +18,14 @@ spec:
       app.kubernetes.io/name: kafka-proxy
       app.kubernetes.io/instance: {{ $.Release.Name | quote }}
       app.kubernetes.io/component: proxy
-      kafka-proxy/ordinal: "{{ $i }}"
+      kafka-proxy/ordinal: {{ $i | quote }}
   template:
     metadata:
       labels:
         app.kubernetes.io/name: kafka-proxy
         app.kubernetes.io/instance: {{ $.Release.Name | quote }}
         app.kubernetes.io/component: proxy
-        kafka-proxy/ordinal: "{{ $i }}"
+        kafka-proxy/ordinal: {{ $i | quote }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -38,15 +39,22 @@ spec:
             - server
             - --dynamic-listeners-disable
 
-            # Proxy listens on 0.0.0.0:<kafkaPort> and advertises kafka-proxy-<i>.<ns>.svc.<clusterDomain>:<kafkaPort>
+            # Listen locally and advertise the per-proxy Service name.
+            #
+            # LEFT side MUST match what Kafka clients will see in metadata for brokers.
+            # That is almost always the CLIENT listener (9092), not the interbroker port.
             - --bootstrap-server-mapping
             - {{ $broker.host }}:{{ $broker.port }},0.0.0.0:{{ $.Values.proxy.service.kafkaPort }},kafka-proxy-{{ $i }}.{{ $.Release.Namespace }}.svc.{{ $.Values.clusterDomain }}:{{ $.Values.proxy.service.kafkaPort }}
 
-            # Dial mapping: where the proxy actually connects upstream
+            # Dial mappings: where the proxy actually connects upstream.
+            # Include ALL brokers so any proxy can connect to any broker as needed.
+            {{- range $j, $b := $.Values.proxy.brokers }}
             - --dial-address-mapping
-            - {{ $broker.host }}:{{ $broker.port }},{{ $broker.host }}:{{ $broker.port }}
+            - {{ $b.host }}:{{ $b.port }},{{ $b.host }}:{{ $b.port }}
+            {{- end }}
 
-            # External mapping: what clients should see in metadata (map broker address -> proxy address)
+            # Rewrite broker addresses in metadata to point at proxies.
+            # Again: LEFT side MUST match the broker addresses/ports returned in metadata (CLIENT listener).
             {{- range $j, $b := $.Values.proxy.brokers }}
             - --external-server-mapping
             - {{ $b.host }}:{{ $b.port }},kafka-proxy-{{ $j }}.{{ $.Release.Namespace }}.svc.{{ $.Values.clusterDomain }}:{{ $.Values.proxy.service.kafkaPort }}
@@ -55,7 +63,7 @@ spec:
             - --http-listen-address
             - 0.0.0.0:{{ $.Values.proxy.service.httpPort }}
 
-            # TLS on the proxy listener (mTLS)
+            # mTLS on the proxy listener (client -> proxy)
             - --proxy-listener-tls-enable
             - --proxy-listener-cert-file
             - /tls/tls.crt
@@ -63,6 +71,15 @@ spec:
             - /tls/tls.key
             - --proxy-listener-ca-chain-cert-file
             - /tls/ca.crt
+
+            # mTLS when dialing upstream brokers (proxy -> broker)
+            - --tls-enable
+            - --tls-ca-chain-cert-file
+            - /tls/ca.crt
+            - --tls-client-cert-file
+            - /tls/tls.crt
+            - --tls-client-key-file
+            - /tls/tls.key
 
             - --log-level
             - {{ $.Values.proxy.logLevel | default "info" }}
