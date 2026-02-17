@@ -1,33 +1,46 @@
 # kafka-fips-chainguard
 
-Requirements Satsified with this Architecture: 
+This repository demonstrates a FIPS-aligned Kafka architecture running on Amazon EKS using:
 
-* FIPS-Validated Chainguard images (Cilium and Kafka-Proxy)
-* mTLS on Kafka proxy
-* Cilium IPsec enabled
-* AES-GCM (rfc4106(gcm(aes))) in use
-* Default-deny CiliumNetworkPolicies
-* EKS (which uses FIPS-capable kernel crypto modules)
+* Chainguard FIPS-validated container images
+* Mutual TLS (mTLS) for all Kafka client and inter-service traffic
+* Cilium for network policy enforcement and IPsec encryption
+* AES-GCM encryption for node-to-node traffic
 
-**DOCUMENTATION AREAS:**
+The design enforces strong cryptographic boundaries, explicit east-west network controls, and modern TLS standards suitable for regulated environments.
 
-Client → mTLS (FIPS TLS1.3) → Proxy
-Proxy → Cilium IPsec (AES-GCM) → Broker
-Node-to-node → IPsec ESP
+<p align="center">
+  <img src="docs/diagrams/kafka-ato-diagram.svg" alt="Kafka FIPS Architecture Diagram" width="900"/>
+</p>
+
+**DOCUMENTATION AREAS**
+
+### Cryptography
+* ✅ FIPS-validated Chainguard images (Kafka Proxy and Cilium)
+* ✅ TLS 1.2 / 1.3 only (TLS 1.0 / 1.1 rejected)
+* ✅ Secrets mounted for certificate management
+* ✅ mTLS authentication enforced
+* ✅ Approved cipher suites only
+* ✅ AES-GCM (RFC4106 gcm(aes)) for IPsec
+* ✅ Cilium default-deny network policies
+* ✅ Explicit allow-list between tiers
+* ✅ TLS required on all Kafka listeners
+* ✅ No plaintext listeners exposed
+* ✅ StatefulSet isolation for brokers and controllers
 
 Additional Reccomendation:
 * OS in FIPS mode (proc/sys/crypto/fips_enabled = 1)
 
 # IAMGUARDED Kafka Deployment Setup
 
-## Create cluster UID
+### Create cluster UID
 
 ```
 docker run --rm cgr.dev/chainguard-private/kafka:latest \
   kafka-storage.sh random-uuid
 ```
 
-## Geberate local TLS certs and create a secret (Skip to generating secret if you already have keys)
+### Generate TLS certs (Skip to generating secret if you already have keys)
 
 ```
 openssl genrsa -out ca.key 4096
@@ -156,7 +169,7 @@ helm upgrade --install kafka oci://cgr.dev/chainguard-private/iamguarded-charts/
   -f kafka-helm/values.yaml
 ```
 
-## Tests & Confirmation
+### Tests & Confirmation
 
 ```
 kubectl -n kafka exec kafka-broker-0 -c kafka -- sh -lc '
@@ -212,7 +225,7 @@ echo "consumer-exit-code=$?"
 '
 
 ```
-# Deploy proxy-fips
+## Deploy proxy-fips
 
 ```
 helm upgrade --install kafka-proxy ./charts/kafka-proxy-fips \
@@ -250,6 +263,7 @@ YAML
 ```
 
 **Test the api from the proxy:** 
+
 ```
 kubectl -n kafka exec kafka-client-test -- \
   /opt/iamguarded/kafka/bin/kafka-broker-api-versions.sh \
@@ -282,13 +296,10 @@ kubectl -n kafka exec kafka-client-test -- sh -lc '
   --create --if-not-exists \
   --topic smoke-test --partitions 3 --replication-factor 3
 '
-
-
 ```
+## Cilium FIPS
 
-# Cilium FIPS
-
-## Configure CIPHER Suite Secret for Encryption
+### Configure CIPHER Suite Secret for Encryption
 
 ```
 kubectl -n kube-system create secret generic cilium-ipsec-keys \
@@ -298,7 +309,7 @@ kubectl -n kube-system create secret generic cilium-ipsec-keys \
 
 Note: the algorithm used and enforced is reccomended for encryption in this use case
 
-## Installation 
+### Installation 
 
 ```
 helm repo add cilium https://helm.cilium.io/
@@ -312,7 +323,7 @@ helm upgrade --install cilium cilium/cilium \
   -f cilium/values.yaml
 ```
 
-## Apply FIPS restrictive network policies for Cilium
+### Apply FIPS restrictive network policies for Cilium
 
 ```
 kubectl apply -f cilium/fips-network-policies/kafka-cilium-netpol.yaml
@@ -338,21 +349,49 @@ kubectl -n kafka get ciliumnetworkpolicies
 kubectl -n kube-system exec ds/cilium -- cilium status | grep Policy
 ``` 
 
-# Test FIPS Configurations
+## Test FIPS Configurations
 
-## FIPS Ciphers using OpenSSL (local port-forward)
-
+**SUCCESS**
 ```
-kubectl -n kafka port-forward svc/kafka-proxy-0 9094:9094
-
-openssl s_client -connect localhost:9094 -tls1
-
-openssl s_client -connect localhost:9094
-
+kubectl -n kafka exec kafka-client-test -- sh -lc '
+echo "== EXPECTED SUCCESS: TLS1.3 AES-GCM =="
 openssl s_client \
-  -connect localhost:9094 \
-  -CAfile ca.crt \
-  -cert client.crt \
-  -key client.key \
-  -tls1_3 </dev/null 2>/dev/null | egrep 'Protocol|Cipher|Verify return code'
+  -connect kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  -servername kafka-proxy-0.kafka.svc.cluster.local \
+  -CAfile /tls/ca.crt \
+  -tls1_3 \
+  -ciphersuites TLS_AES_256_GCM_SHA384 \
+  -verify_return_error \
+  -brief < /dev/null
+echo "exit-code=$?"
+'
+```
+**FAILURE** 
+```
+kubectl -n kafka exec kafka-client-test -- sh -lc '
+echo "== EXPECTED FAIL (if FIPS-only ciphers): TLS1.3 CHACHA20 =="
+openssl s_client \
+  -connect kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  -servername kafka-proxy-0.kafka.svc.cluster.local \
+  -CAfile /tls/ca.crt \
+  -tls1_3 \
+  -ciphersuites TLS_CHACHA20_POLY1305_SHA256 \
+  -verify_return_error \
+  -brief < /dev/null
+echo "exit-code=$?"
+'
+```
+
+**confirm failure for PLAINTEXT**
+```
+kubectl -n kafka exec kafka-client-test -- sh -lc '
+echo "== EXPECTED SUCCESS: create topic via proxy TLS =="
+/opt/iamguarded/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-proxy-0.kafka.svc.cluster.local:9094 \
+  --command-config /tmp/client.properties \
+  --create --if-not-exists --topic fips-ok \
+  --partitions 1 --replication-factor 1
+
+echo "exit-code=$?"
+'
 ```

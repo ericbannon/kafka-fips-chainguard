@@ -1,4 +1,34 @@
-# Controller quorum: controller ↔ controller on 9093
+# 0) DNS egress for ALL pods in kafka namespace -> kube-dns/coredns (cluster DNS)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-dns-egress
+  namespace: kafka
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: coredns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# 1) Controller quorum: controller <-> controller on 9093
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -30,7 +60,7 @@ spec:
             - port: "9093"
               protocol: TCP
 ---
-# Brokers → controllers on 9093 (KRaft)
+# 2) Brokers -> controllers on 9093 (KRaft) (broker egress)
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -52,11 +82,33 @@ spec:
             - port: "9093"
               protocol: TCP
 ---
-# Broker ↔ broker on 9094 (inter-broker INTERNAL listener)
+# 3) Controllers allow ingress from brokers on 9093 (MISSING in your set)
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: kafka-allow-broker-interbroker
+  name: kafka-allow-controller-from-broker
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:app.kubernetes.io/name: kafka
+      k8s:app.kubernetes.io/component: controller
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app.kubernetes.io/name: kafka
+            k8s:app.kubernetes.io/component: broker
+      toPorts:
+        - ports:
+            - port: "9093"
+              protocol: TCP
+---
+# 4) Broker <-> broker on 9094 (inter-broker INTERNAL TLS listener)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-broker-interbroker-9094
   namespace: kafka
 spec:
   endpointSelector:
@@ -84,11 +136,11 @@ spec:
             - port: "9094"
               protocol: TCP
 ---
-# Proxy → brokers on 9094 (proxy dials broker INTERNAL TLS)
+# 5) Proxy -> brokers on 9094 (proxy dials broker INTERNAL TLS)
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: kafka-allow-proxy-to-brokers
+  name: kafka-allow-proxy-to-brokers-9094
   namespace: kafka
 spec:
   endpointSelector:
@@ -106,48 +158,7 @@ spec:
             - port: "9094"
               protocol: TCP
 ---
-# Broker ingress from proxy on 9094
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: kafka-allow-broker-from-proxy
-  namespace: kafka
-spec:
-  endpointSelector:
-    matchLabels:
-      k8s:app.kubernetes.io/name: kafka
-      k8s:app.kubernetes.io/component: broker
-  ingress:
-    - fromEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: kafka
-            k8s:app.kubernetes.io/name: kafka-proxy
-            k8s:app.kubernetes.io/component: proxy
-      toPorts:
-        - ports:
-            - port: "9094"
-              protocol: TCP
----
-# Allow clients in-cluster to reach proxy listener 9094
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: kafka-allow-ingress-to-proxy-9094
-  namespace: kafka
-spec:
-  endpointSelector:
-    matchLabels:
-      k8s:app.kubernetes.io/name: kafka-proxy
-      k8s:app.kubernetes.io/component: proxy
-  ingress:
-    - fromEntities:
-        - cluster
-      toPorts:
-        - ports:
-            - port: "9094"
-              protocol: TCP
----
-# ingress allowlist for 9092 and 9094
+# 6) Broker ingress allowlist (single policy): allow broker<->broker 9094 and proxy->broker 9094
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -169,7 +180,6 @@ spec:
         - ports:
             - port: "9094"
               protocol: TCP
-
     # allow proxy to hit broker INTERNAL (9094)
     - fromEndpoints:
         - matchLabels:
@@ -181,7 +191,46 @@ spec:
             - port: "9094"
               protocol: TCP
 ---
-# Cluster DNS
+# 7) Allow clients in-cluster to reach proxy listener 9094 (ingress to proxy)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-ingress-to-proxy-9094
+  namespace: kafka
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:app.kubernetes.io/name: kafka-proxy
+      k8s:app.kubernetes.io/component: proxy
+  ingress:
+    - fromEntities:
+        - cluster
+      toPorts:
+        - ports:
+            - port: "9094"
+              protocol: TCP
+---
+# 8) (Often needed) allow pods in kafka namespace to egress to proxies on 9094
+# If you have any default-deny egress behavior, this prevents silent client failures.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kafka-allow-egress-to-proxy-9094
+  namespace: kafka
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kafka
+            k8s:app.kubernetes.io/name: kafka-proxy
+            k8s:app.kubernetes.io/component: proxy
+      toPorts:
+        - ports:
+            - port: "9094"
+              protocol: TCP
+---
+# 9) kube-dns/coredns -> VPC resolver (only if your cluster DNS forwards to 10.0.0.2)
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -201,27 +250,8 @@ spec:
             - port: "53"
               protocol: TCP
 ---
-# Kafka DNS egress
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: kafka-allow-dns-egress
-  namespace: kafka
-spec:
-  endpointSelector: {}
-  egress:
-    - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: kube-system
-            k8s:k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
----
-# Allows DNS egress for local testing
+# 10) Optional: host-networked pods ("reserved:host") DNS + HTTPS egress
+# This does NOT fix node/container-runtime image pull DNS problems, but can help hostNetwork pods.
 apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
 metadata:

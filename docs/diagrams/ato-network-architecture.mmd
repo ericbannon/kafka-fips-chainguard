@@ -1,0 +1,53 @@
+%%{init: {"flowchart": {"rankSpacing": 120, "nodeSpacing": 80, "curve": "linear"}}}%%
+flowchart TB
+
+  %% =========================
+  %% FIPS Cryptographic Boundary
+  %% =========================
+  subgraph FIPS["FIPS 140 Cryptographic Boundary"]
+
+    direction TB
+
+    CLIENTS["In-Cluster Clients<br/>Kafka Producers / Consumers<br/>mTLS Authentication Required"]
+
+    subgraph PROXY["Kafka Proxy Tier (proxy-fips Image)"]
+      direction TB
+      PCORE["Proxy Server<br/>Listener :9094 (mTLS)<br/>TLS 1.2 / 1.3 Only"]
+      PFIPS["Embedded FIPS 140 Validated Crypto Module<br/>Approved Cipher Suites Only<br/>TLS 1.0 / 1.1 Rejected"]
+      PCERTS["Mounted Secrets<br/>ca.crt / tls.crt / tls.key"]
+    end
+
+    subgraph KAFKA["Kafka KRaft Cluster"]
+      direction TB
+      BROKERS["Brokers (StatefulSet x3)<br/>CLIENT :9092 (SSL)<br/>INTERNAL :9094 (SSL)<br/>mTLS Required"]
+      CONTROLLERS["Controllers (StatefulSet x3)<br/>Quorum :9093 (SSL)<br/>mTLS Required"]
+    end
+
+  end
+
+  %% =========================
+  %% Cilium Network Policies (Bottom)
+  %% =========================
+  subgraph CILIUM["Cilium Network Policy Enforcement"]
+    direction TB
+    NP1["Allow: Client → Proxy :9094"]
+    NP2["Allow: Proxy → Broker :9094"]
+    NP3["Allow: Broker ↔ Broker :9094"]
+    NP4["Allow: Broker → Controller :9093"]
+    NPDENY["Default Deny<br/>All Other East/West Traffic Blocked"]
+  end
+
+  %% =========================
+  %% Traffic Flow (Vertical)
+  %% =========================
+  CLIENTS -->|"mTLS 9094"| PCORE
+  PCORE -->|"mTLS 9094"| BROKERS
+  BROKERS -->|"mTLS 9093"| CONTROLLERS
+  BROKERS <-->|"mTLS 9094 Replication"| BROKERS
+
+  %% Proxy internals
+  PFIPS --> PCORE
+  PCERTS --> PCORE
+
+  %% Show Cilium enforcing below
+  FIPS -->|"Traffic Governed By"| CILIUM
