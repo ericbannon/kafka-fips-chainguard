@@ -122,41 +122,45 @@ echo "TRUSTPASS=$TRUSTPASS"
 kubectl -n kafka create secret generic kafka-tls-passwords \
   --from-literal=keystore-password="$KEYPASS" \
   --from-literal=truststore-password="$TRUSTPASS" \
+  --from-literal=key-password="$KEYPASS" \
   --dry-run=client -o yaml | kubectl apply -f -
   ```
 
-### Generate JKS Secrets for Iamguarded Chainguard Configuration
+### Generate BCFKS Secrets for Iamguarded Chainguard Configuration
 
 ```
-openssl pkcs8 -topk8 -nocrypt -in proxy.key -out proxy.pkcs8.key
+docker run --rm \
+  -v "$PWD/certs:/certs" \
+  -e TRUSTPASS="$TRUSTPASS" \
+  -e KEYPASS="$KEYPASS" \
+  --entrypoint sh \
+  cgr.dev/chainguard-private/kafka-fips:latest -lc '
+    set -euo pipefail
 
-openssl pkcs12 -export \
-  -in proxy.crt \
-  -inkey proxy.pkcs8.key \
-  -certfile ca.crt \
-  -name kafka \
-  -passout pass:"$KEYPASS" \
-  -out kafka.keystore.p12
+    keytool -genkeypair -alias kafka -keyalg RSA -keysize 2048 -validity 365 \
+      -dname "CN=localhost" \
+      -keystore /certs/kafka.keystore.bcfks -storetype BCFKS \
+      -storepass "$TRUSTPASS" -keypass "$KEYPASS" \
+      -providername BCFIPS \
+      -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
 
-keytool -importkeystore \
-  -srckeystore kafka.keystore.p12 \
-  -srcstoretype PKCS12 \
-  -srcstorepass "$KEYPASS" \
-  -destkeystore kafka.keystore.jks \
-  -deststoretype JKS \
-  -deststorepass "$KEYPASS" \
-  -noprompt
+    keytool -exportcert -alias kafka \
+      -keystore /certs/kafka.keystore.bcfks -storetype BCFKS \
+      -storepass "$TRUSTPASS"" \
+      -providername BCFIPS \
+      -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
+      -file /certs/kafka.der
 
-keytool -importcert \
-  -alias CARoot \
-  -file ca.crt \
-  -keystore kafka.truststore.jks \
-  -storepass "$TRUSTPASS" \
-  -noprompt
+    keytool -importcert -alias kafka -file /certs/kafka.der \
+      -keystore /certs/kafka.truststore.bcfks -storetype BCFKS \
+      -storepass "$TRUSTPASS"" -noprompt \
+      -providername BCFIPS \
+      -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
+  '
 
-kubectl -n kafka create secret generic kafka-jks \
-  --from-file=kafka.keystore.jks=./kafka.keystore.jks \
-  --from-file=kafka.truststore.jks=./kafka.truststore.jks \
+kubectl -n kafka create secret generic kafka-bcfks \
+  --from-file=kafka.keystore.bcfks=./certs/kafka.keystore.bcfks \
+  --from-file=kafka.truststore.bcfks=./certs/kafka.truststore.bcfks \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -395,3 +399,6 @@ echo "== EXPECTED SUCCESS: create topic via proxy TLS =="
 echo "exit-code=$?"
 '
 ```
+
+
+Andy Marshall <andy.marshall@chainguard.dev>, chris_peppler@trimble.com, Jarrett Olin <jarrett.olin@chainguard.dev>, Jeffrey Roth <jeffrey_roth@trimble.com>, Scot Gorman <scot_gorman@trimble.com>
